@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Dashboard - MinkGlobal</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; height: 100vh; display: flex; }
+    #sidebar { width: 200px; background: #333; color: white; padding: 10px; }
+    #sidebar button { width: 100%; margin: 5px 0; padding: 8px; cursor: pointer; }
+    #main { flex: 1; padding: 20px; overflow: auto; }
+    table { border-collapse: collapse; width: 100%; margin-top: 10px; }
+    th, td { border: 1px solid #ccc; padding: 5px; text-align: left; }
+    th { background: #eee; }
+    #acciones button { margin-right: 10px; }
+
+    /* Modal */
+    #modal.hidden { display: none; }
+    #modal { position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+             background: rgba(0,0,0,0.5); display: flex; justify-content: center; align-items: center; }
+    #modalContent { background: white; padding: 20px; border-radius: 8px; width: 400px; max-height: 80vh; overflow: auto; }
+    #modalContent input { width: 100%; margin-bottom: 10px; padding: 6px; }
+    #modalContent label { font-weight: bold; display: block; margin-top: 5px; }
+    #modalContent button { margin-right: 10px; }
+  </style>
+</head>
+<body>
+  <div id="sidebar"></div>
+  <div id="main">
+    <h2 id="tituloTabla">Selecciona una tabla</h2>
+    <div id="acciones"></div>
+    <table id="tablaDatos"><thead></thead><tbody></tbody></table>
+  </div>
+
+  <!-- Modal -->
+  <div id="modal" class="hidden">
+    <div id="modalContent">
+      <h3 id="modalTitle"></h3>
+      <form id="modalForm"></form>
+      <button onclick="guardar()">Guardar</button>
+      <button onclick="cerrarModal()">Cancelar</button>
+    </div>
+  </div>
+
+  <script>
+    const tipo = parseInt(localStorage.getItem("tipo"));
+    const tablas = [
+      "TipoUsuario", "Compañia", "Usuarios", "DocumentosPFisicos", "Domicilio",
+      "PersonasFisicas", "DocumentosPMoral", "CapitalSocial", "FormaAdmin",
+      "Apoderados", "DomicilioLegal", "DomicilioOperativo", "PersonaMoral"
+    ];
+    let tablaActual = null;
+    let tablasCache = {};
+    let editando = null;
+
+    function renderSidebar() {
+      const sb = document.getElementById("sidebar");
+      sb.innerHTML = "<h3>Tablas</h3>";
+      tablas.forEach(nombre => {
+        const btn = document.createElement("button");
+        btn.innerText = nombre;
+        btn.onclick = () => mostrarTabla(nombre);
+        sb.appendChild(btn);
+      });
+    }
+
+    async function mostrarTabla(nombre) {
+      tablaActual = nombre;
+      document.getElementById("tituloTabla").innerText = "Tabla: " + nombre;
+      const res = await fetch("/" + nombre);
+      const data = await res.json();
+      tablasCache[nombre] = data;
+      const thead = document.querySelector("#tablaDatos thead");
+      const tbody = document.querySelector("#tablaDatos tbody");
+      thead.innerHTML = "";
+      tbody.innerHTML = "";
+
+      if (!data.length) {
+        thead.innerHTML = "<tr><th>Sin registros</th></tr>";
+        return;
+      }
+
+      const headerRow = document.createElement("tr");
+      Object.keys(data[0]).forEach(k => {
+        const th = document.createElement("th");
+        th.innerText = k;
+        headerRow.appendChild(th);
+      });
+      if (tipo === 1) {
+        const thAcc = document.createElement("th");
+        thAcc.innerText = "Acciones";
+        headerRow.appendChild(thAcc);
+      }
+      thead.appendChild(headerRow);
+
+      data.forEach(row => {
+        const tr = document.createElement("tr");
+        Object.values(row).forEach(val => {
+          const td = document.createElement("td");
+          td.innerText = val === null ? "NULL" : val;
+          tr.appendChild(td);
+        });
+        if (tipo === 1) {
+          const tdAcc = document.createElement("td");
+          const keys = Object.keys(row);
+          const idcol = keys[0];
+          const idval = row[idcol];
+          tdAcc.innerHTML = `
+            <button onclick='editar("${idcol}", "${idval}")'>Editar</button>
+            <button onclick='eliminar("${idcol}", "${idval}")'>Eliminar</button>
+          `;
+          tr.appendChild(tdAcc);
+        }
+        tbody.appendChild(tr);
+      });
+
+      const acciones = document.getElementById("acciones");
+      acciones.innerHTML = tipo === 1 ? `<button onclick="agregar()">Agregar registro</button>` : "";
+    }
+
+    function abrirModal(titulo, datos = null) {
+      document.getElementById("modalTitle").innerText = titulo;
+      const form = document.getElementById("modalForm");
+      form.innerHTML = "";
+      const campos = datos ? Object.keys(datos) : Object.keys(tablasCache[tablaActual][0] || {});
+      campos.forEach(c => {
+        const val = datos ? (datos[c] ?? "") : "";
+        form.innerHTML += `<label>${c}</label><input name="${c}" value="${val}">`;
+      });
+      document.getElementById("modal").classList.remove("hidden");
+    }
+
+    function cerrarModal() {
+      document.getElementById("modal").classList.add("hidden");
+      editando = null;
+    }
+
+    function agregar() {
+      abrirModal("Agregar registro");
+      editando = { modo: "agregar" };
+    }
+
+    async function editar(idcol, idval) {
+      const res = await fetch(`/${tablaActual}/${idcol}/${encodeURIComponent(idval)}`);
+      const datos = await res.json();
+      abrirModal("Editar registro", datos);
+      editando = { modo: "editar", idcol, idval };
+    }
+
+    async function eliminar(idcol, idval) {
+      if (!confirm("¿Eliminar este registro?")) return;
+      await fetch(`/${tablaActual}/${idcol}/${encodeURIComponent(idval)}`, { method: "DELETE" });
+      mostrarTabla(tablaActual);
+    }
+
+    async function guardar() {
+      const form = document.getElementById("modalForm");
+      const data = {};
+      [...form.elements].forEach(el => {
+        if (el.name) data[el.name] = el.value || null;
+      });
+
+      let res;
+      if (editando.modo === "agregar") {
+        res = await fetch(`/${tablaActual}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(data)
+        });
+      } else {
+        res = await fetch(`/${tablaActual}/${editando.idcol}/${encodeURIComponent(editando.idval)}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(data)
+        });
+      }
+
+      cerrarModal();
+      mostrarTabla(tablaActual);
+    }
+
+    renderSidebar();
+  </script>
+</body>
+</html>

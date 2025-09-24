@@ -1,89 +1,146 @@
-from flask import Flask, request, jsonify
-from flask_cors import CORS
+from flask import Flask, request, jsonify, render_template
 import psycopg2
-import os
+from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
-CORS(app)
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://root:7mgTqqo94F85Rv2akV9QcpqAL5Uwk9KS@dpg-d39nbjumcj7s739g2v2g-a.oregon-postgres.render.com/minkglobal")
+# Conexión a tu base de datos en Render
+def get_db_connection():
+    return psycopg2.connect(
+        "postgresql://root:7mgTqqo94F85Rv2akV9QcpqAL5Uwk9KS@dpg-d39nbjumcj7s739g2v2g-a.oregon-postgres.render.com/minkglobal",
+        sslmode='require'
+    )
 
-conn = psycopg2.connect(DATABASE_URL)
-
+# Ruta principal: login
 @app.route("/")
-def home():
-    return "API funcionando 🚀"
+def index():
+    return render_template("index.html")
+
+# Ruta dashboard: vista CRUD
+@app.route("/dashboard")
+def dashboard():
+    return render_template("dashboard.html")
 
 # ===== LOGIN =====
 @app.route("/login", methods=["POST"])
 def login():
-    data = request.json
-    cur = conn.cursor()
-    cur.execute('SELECT * FROM "Usuarios" WHERE "Nombre(s)"=%s AND "Contraseña"=%s',
-                (data["username"], data["password"]))
-    row = cur.fetchone()
-    colnames = [desc[0] for desc in cur.description] if row else []
-    cur.close()
-    if row:
-        return jsonify({"success": True, "user": dict(zip(colnames, row))})
-    return jsonify({"success": False})
+    try:
+        data = request.json
+        if not data or "username" not in data or "password" not in data:
+            return jsonify({"success": False, "error": "Datos incompletos"})
 
-# ===== CRUD GENÉRICO =====
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute('SELECT * FROM "Usuarios" WHERE "Nombre(s)" = %s', (data["username"],))
+        user = cur.fetchone()
+        cur.close()
+        conn.close()
+
+        if user and user["Contraseña"] == data["password"]:
+            user_data = {k: v for k, v in user.items() if k != "Contraseña"}
+            return jsonify({"success": True, "user": user_data})
+        return jsonify({"success": False, "error": "Credenciales inválidas"})
+    except Exception as e:
+        print("Error en login:", str(e))
+        return jsonify({"success": False, "error": "Error del servidor"}), 500
+
+# ===== CRUD GENERAL =====
+TABLAS_PERMITIDAS = [
+    "TipoUsuario", "Compañia", "Usuarios", "DocumentosPFisicos", "Domicilio",
+    "PersonasFisicas", "DocumentosPMoral", "CapitalSocial", "FormaAdmin",
+    "Apoderados", "DomicilioLegal", "DomicilioOperativo", "PersonaMoral"
+]
+
 @app.route("/<tabla>", methods=["GET"])
-def get_all(tabla):
-    cur = conn.cursor()
-    cur.execute(f'SELECT * FROM "{tabla}"')
-    rows = cur.fetchall()
-    colnames = [desc[0] for desc in cur.description]
-    cur.close()
-    return jsonify([dict(zip(colnames, r)) for r in rows])
+def get_tabla(tabla):
+    tabla = tabla.strip().replace('"', '')
+    if tabla not in TABLAS_PERMITIDAS:
+        return jsonify({"error": "Tabla no permitida"}), 404
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        # Obtener nombre de la primera columna
+        cur.execute(f'SELECT * FROM "{tabla}" LIMIT 1')
+        colnames = [desc[0] for desc in cur.description]
+        idcol = colnames[0]
+        cur.execute(f'SELECT * FROM "{tabla}" ORDER BY "{idcol}"')
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return jsonify(rows)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-@app.route("/<tabla>/<idcol>/<idval>", methods=["GET"])
-def get_one(tabla, idcol, idval):
-    cur = conn.cursor()
-    cur.execute(f'SELECT * FROM "{tabla}" WHERE "{idcol}"=%s', (idval,))
-    row = cur.fetchone()
-    colnames = [desc[0] for desc in cur.description] if row else []
-    cur.close()
-    if row:
-        return jsonify(dict(zip(colnames, row)))
-    return jsonify({})
 
 @app.route("/<tabla>", methods=["POST"])
-def create(tabla):
-    data = request.json
-    cols = ",".join([f'"{k}"' for k in data.keys()])
-    vals = ",".join(["%s"] * len(data))
-    cur = conn.cursor()
-    cur.execute(f'INSERT INTO "{tabla}" ({cols}) VALUES ({vals}) RETURNING *', tuple(data.values()))
-    row = cur.fetchone()
-    colnames = [desc[0] for desc in cur.description]
-    conn.commit()
-    cur.close()
-    return jsonify(dict(zip(colnames, row)))
+def agregar(tabla):
+    tabla = tabla.strip().replace('"', '')
+    if tabla not in TABLAS_PERMITIDAS:
+        return jsonify({"error": "Tabla no permitida"}), 404
+    try:
+        data = request.json
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cols = ", ".join([f'"{k}"' for k in data.keys()])
+        vals = ", ".join(["%s"] * len(data))
+        cur.execute(f'INSERT INTO "{tabla}" ({cols}) VALUES ({vals})', list(data.values()))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/<tabla>/<idcol>/<idval>", methods=["GET"])
+def obtener(tabla, idcol, idval):
+    tabla = tabla.strip().replace('"', '')
+    if tabla not in TABLAS_PERMITIDAS:
+        return jsonify({"error": "Tabla no permitida"}), 404
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute(f'SELECT * FROM "{tabla}" WHERE "{idcol}" = %s', (idval,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return jsonify(row if row else {"error": "No encontrado"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/<tabla>/<idcol>/<idval>", methods=["PUT"])
-def update(tabla, idcol, idval):
-    data = request.json
-    set_clause = ",".join([f'"{k}"=%s' for k in data.keys()])
-    cur = conn.cursor()
-    cur.execute(f'UPDATE "{tabla}" SET {set_clause} WHERE "{idcol}"=%s RETURNING *',
-                tuple(data.values())+(idval,))
-    row = cur.fetchone()
-    colnames = [desc[0] for desc in cur.description] if row else []
-    conn.commit()
-    cur.close()
-    return jsonify(dict(zip(colnames, row)))
+def actualizar(tabla, idcol, idval):
+    tabla = tabla.strip().replace('"', '')
+    if tabla not in TABLAS_PERMITIDAS:
+        return jsonify({"error": "Tabla no permitida"}), 404
+    try:
+        data = request.json
+        conn = get_db_connection()
+        cur = conn.cursor()
+        set_clause = ", ".join([f'"{k}" = %s' for k in data.keys()])
+        values = list(data.values()) + [idval]
+        cur.execute(f'UPDATE "{tabla}" SET {set_clause} WHERE "{idcol}" = %s', values)
+        conn.commit()
+        cur.close()
+        conn.close()
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/<tabla>/<idcol>/<idval>", methods=["DELETE"])
-def delete(tabla, idcol, idval):
-    cur = conn.cursor()
-    cur.execute(f'DELETE FROM "{tabla}" WHERE "{idcol}"=%s RETURNING *', (idval,))
-    row = cur.fetchone()
-    colnames = [desc[0] for desc in cur.description] if row else []
-    conn.commit()
-    cur.close()
-    return jsonify(dict(zip(colnames, row)) if row else {})
+def eliminar(tabla, idcol, idval):
+    tabla = tabla.strip().replace('"', '')
+    if tabla not in TABLAS_PERMITIDAS:
+        return jsonify({"error": "Tabla no permitida"}), 404
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(f'DELETE FROM "{tabla}" WHERE "{idcol}" = %s', (idval,))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run(debug=True)
